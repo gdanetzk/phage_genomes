@@ -1,0 +1,132 @@
+#!/bin/bash --login
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem-per-cpu=8G
+#SBATCH --time=6:00:00 
+#SBATCH --job-name phage
+
+cd /mnt/scratch/Phage/
+
+### Trim reads prior to isolate assembly 
+conda activate BBTools
+bbduk.sh in1=phagea_S12_L004_R1_001.fastq.gz in2=phagea_S12_L004_R2_001.fastq.gz out1=phagea_R1_q20.fastq.gz out2=phagea_R2_q20.fastq.gz qtrim=rl trimq=20 minlength=100 tossjunk=f
+conda deactivate 
+
+### Generate new FastQC reports
+conda activate FastQC
+fastqc phagea_R1_q20.fastq.gz phagea_R2_q20.fastq.gz --noextract -o FastQC/
+conda deactivate 
+
+### Remove Illumina adapters
+conda activate BBTools
+bbduk.sh in1=phagea_R1_q20.fastq.gz in2=phagea_R2_q20.fastq.gz out1=phage_R1_clean.fq out2=phage_R2_clean.fq ref=/mnt/home/anaconda3/envs/BBTools/bbtools/lib/resources/adapters.fa hdist=1 tpe tbo
+conda deactivate 
+
+### Generate new FastQC reports
+conda activate FastQC
+fastqc phage_R1_clean.fq phage_R2_clean.fq -o FastQC/
+conda deactivate 
+
+### Remove host reads
+conda activate MiniMap2
+## MiniMap2 index of host genome (PssB728a)
+#minimap2 -d PssB728a.mmi Pseudomonas_syringae_pv_syringae_b728.fasta
+# Map QC'd reads from each sample to host; paired-end alignment
+minimap2 -ax sr PssB728a.mmi phage_R1_clean.fq phage_R2_clean.fq > phage_data/phage_clean.sam
+conda deactivate 
+
+## Extract unampped reads from sam file
+conda activate SAMtools
+samtools view -f 5 phage_data/phage_clean.sam > phage_data/phage_clean_unmap.sam
+conda deactivate 
+
+### Convert to fastq
+conda activate BBTools
+repair.sh in=phage_data/phage_clean_unmap.sam out=phage_data/phage_R1_clean_unmap.fastq out2=phage_data/phage_R2_clean_unmap.fastq outs=phage_data/phage_sing_unmapped.fastq #5% singeltons
+conda deactivate 
+
+### Subsample reads
+conda activate BBTools
+bbnorm.sh in1=phage_data/phage_R1_clean_unmap.fastq in2=phage_data/phage_R2_clean_unmap.fastq out1=phage_data/phage_R1_clean_unmap_norm.fastq out2=phage_data/phage_R2_clean_unmap_norm.fastq target=100 mindepth=15
+conda deactivate 
+
+### Metaviral assembly with trimmed; subsampled; filtered reads
+conda activate SPAdes
+spades.py -m 320 -t 32 --metaviral -1 phage_data/phage_R1_clean_unmap_norm.fastq -2 phage_data/phage_R2_clean_unmap_norm.fastq -o MV_clean_norm/phage_data/ # 16 contigs
+# rename contigs files
+cp MV_sub/phage_data/contigs.fasta Assemblies/phage_contigs.fasta
+# Assembly statistics
+NanoStat --fasta Assemblies/phage_contigs.fasta > Assemblies/phage_contigs_stats.txt
+conda deactivate 
+
+### Polish genomes
+# created .bam file for Pilon
+conda activate MiniMap2
+minimap2 -ax sr -t 8 MV_clean_norm/phage_data/contigs.fasta phage_R1_clean.fq phage_R2_clean.fq > phage_data/phage_pilon.sam
+conda deactivate 
+# convert .sam to .bam, sort & index reads 
+conda activate SAMtools
+samtools view -Sb phage_data/phage_pilon.sam > phage_data/phage_pilon.bam
+samtools sort phage_data/phage_pilon.bam > phage_data/phage_pilon_sort.bam
+samtools index phage_data/phage_pilon_sort.bam
+conda deactivate
+
+## polish genome assembly with Pilon
+#conda activate Pilon
+## run with spades contigs file, same number in pilon output
+#pilon -Xmx64G --threads 16 --fix all --genome MV_clean_norm/phage_data/contigs.fasta --frags phage_data/phage_pilon_sort.bam --outdir Pilon/phage_data/ --output cont
+## run with spades scaffold file, same number in pilon output
+#pilon -Xmx64G --threads 16 --fix all --genome MV_clean_norm/phage_data/scaffolds.fasta --frags phage_data/phage_pilon_sort.bam --outdir Pilon/phage_data/ --output scaf
+## run with non-pseudomonas contigs from blast search
+#pilon -Xmx64G --threads 16 --fix all --genome /mnt/home/Phage/Phage_contig14.fasta --frags phage_data/phage_pilon_sort.bam --outdir Pilon/phage_data/ --output contig14
+
+
+### Polish genomes with different inital fastq reads 
+# created .bam file for Pilon
+conda activate MiniMap2
+minimap2 -ax sr -t 16 /mnt/home/Phage/Phage_contig14.fasta phage_data/phage_R1_clean_unmap.fastq phage_data/phage_R2_clean_unmap.fastq > phage_data/phage_pilon_c14.sam
+conda deactivate 
+
+# convert .sam to .bam, sort & index reads 
+conda activate SAMtools
+samtools view -Sb phage_data/phage_pilon_c14.sam > phage_data/phage_pilon_c14.bam
+samtools sort phage_data/phage_pilon_c14.bam > phage_data/phage_pilon_c14_sort.bam
+samtools index phage_data/phage_pilon_c14_sort.bam
+conda deactivate
+
+# run with non-host qc fastq and non-pseudomonas contig 
+conda activate Pilon
+pilon -Xmx64G --threads 16 --fix all --genome /mnt/home/Phage/Phage_contig14.fasta --frags phage_data/phage_pilon_c14_sort.bam --outdir Pilon/phage_data/ --output contig14v2
+conda deactivate 
+
+### Use Unicycler to circulize genome
+conda activate Unicycler
+unicycler --short1 phage_data/phage_R1_clean_unmap_norm.fastq --short2 phage_data/phage_R2_clean_unmap_norm.fastq -o Unicycler/phage_data --contamination Pseudomonas_syringae_pv_syringae_b728.fasta --mode normal --keep 2 --threads 16 #--no_correct --no_pilon
+conda deactivate 
+
+### Run Circlator on polished genome
+conda activate Circulator
+circlator all Pilon/phage_data/contig14.fasta phage_data/phage_pilon_sort.bam Circlator/phage_data/ 
+conda deactivate 
+
+### Prokka annotation
+conda activate PROKKA
+## shorten contig names for prokka <37 characters 
+#cp Pilon/phage_data/contig14v2.fasta Assemblies/phage_contig14v2.fasta
+#prokka --outdir Assemblies/ --force --prefix phage Assemblies/phage_contigs.fasta
+#prokka --outdir Assemblies/ --force --prefix phage_contig14v2 Assemblies/phage_contig14v2.fasta
+## run prokka with reference annotation file from Pss phage MR2
+prokka -outdir Assemblies2/ --force --prefix phage_contig14v2 --Kingdom Viruses --proteins /mnt/home/Phage_genomes/Pss_phage_MR2.gb Assemblies/phage_contig14v2.fasta
+
+prokka -outdir Assemblies3/ --force --prefix phage_contig14v2 --Kingdom Viruses Assemblies/phage_contig14v2.fasta
+conda deactivate 
+
+### Manual functional annotation with web-based BLAST
+
+### Genome map with EasyFig: /mnt/home/Easyfig_2.2.2_OSX/Easyfig.py
+conda activate EasyFig
+python /mnt/home/shell_scripts/Easyfig.py -o /mnt/scratch/phage_figure.svg /mnt/scratch/Assemblies/phage_contig14v2.gbk -svg
+
+conda deactivate 
+
