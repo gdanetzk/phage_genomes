@@ -1,0 +1,134 @@
+---
+title: "Pss_Phage_genome_map"
+author: "Kristi Gdanetz MacCready"
+date: "2024-06-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/Phage_genomes/")
+```
+
+# Load libraries 
+```{r, warning=FALSE, message=FALSE}
+library(Biostrings)
+library(tidyverse)
+library(readxl)
+library(batman) #use for logical formatting 
+library(gggenes)
+library(gggenomes) #developer version 
+library(cowplot)
+theme_set(theme_cowplot())
+set.seed(125)
+```
+
+# Color scheme
+Import categories from Nat Comm (2023)14:6517
+```{r}
+nat_cols <- read_excel(path = "color_annotations.xlsx", sheet = "Sheet1",
+                       skip = 12, col_names = TRUE) %>%
+  rename(Annotations = name)
+```
+
+
+# Import files
+Tab delimited tables of phage genome annotations
+```{r}
+cot4 <- read_delim(file = "Pseudomonas_phage_cot4/COT4_OK258139_Annotations.tsv", 
+                       delim = "\t", col_names = TRUE, show_col_types = FALSE) %>%
+  select(Name, Minimum, Maximum, Direction, protein_id) %>% 
+  add_column(Molecule = "COT4") 
+   
+rec1 <- read_delim(file = "Pseudomonas_phage_rec1/REC1_OK275491_Annotations.tsv", 
+                       delim = "\t", col_names = TRUE, show_col_types = FALSE) %>%
+  select(Name, Minimum, Maximum, Direction, protein_id) %>% 
+  add_column(Molecule = "REC1") %>%
+  filter(Name != "peptidyl-tRNA hydrolase")
+
+# SHL2 in slightly different format from other 
+shl2 <- read_delim(file = "Pseudomonas_phage_SHL2/data/GCA_900007805.1/SHL2_LN889756.1_Annotations.tsv", 
+                       delim = "\t", col_names = TRUE, show_col_types = FALSE) %>% #100 rows
+  select(Minimum, Maximum, Direction, protein_id, product) %>% 
+  dplyr::rename(Name = product) %>%
+  add_column(Molecule = "SHL2") %>% drop_na()
+```
+
+# Format for plotting
+```{r}
+# join all files
+phage_positions <- rbind(rec1, cot4, shl2) %>%
+  # get rid of CDS at end of each annotation 
+  rename(Annotations = Name) %>%
+  mutate(Annotations = str_replace_all(Annotations, 
+                                       pattern = " CDS", replacement = ""),
+         Annotations = str_replace_all(Annotations, 
+                                       pattern = "putative ", replacement = ""),
+         #extra space after protease 
+         Annotations = str_replace_all(Annotations, pattern = "prohead protease ", 
+                                       replacement = "prohead protease"),
+         Direction = to_logical(Direction, 
+                                custom_true = "forward", custom_false = "reverse")) %>%
+  # format new colors
+  left_join(nat_cols, by = "Annotations")
+```
+
+Annotation names list
+```{r}
+# make annotation dataframe
+annots <- phage_positions %>%
+  mutate(Position = round((Minimum + Maximum)/ 2), digits = 0) %>% 
+  select(Annotations, Position, Minimum, Maximum, Direction, Molecule) %>% 
+  # format new colors
+  left_join(nat_cols, by = "Annotations") %>%
+  filter(figure == "show") #remove excess labels for plots
+```
+
+
+# Plot it
+```{r}
+phg_plot <- ggplot(data = phage_positions, 
+                 aes(xmin = Minimum, xmax = Maximum, 
+                     y = Molecule, fill = category, 
+                     forward = Direction)) +
+  facet_wrap(~Molecule, scales = "free_y", ncol = 1) +  
+  geom_gene_arrow(arrowhead_width = unit(2, "mm"),
+                  arrowhead_height = unit(10, "mm"),
+                  arrow_body_height = unit(6, "mm"), 
+                  color = NA,) +
+  # add annotation data
+  geom_feature_label(data = annots,
+                     label_height = unit(20, "mm"),  #make text larger
+                     feature_height = unit(5, "mm"), #move text vertically
+                     aes(x = Position, y = Molecule,
+                         label = Annotations, forward = Direction,
+                         angle = 45) ) +
+  # custom colors
+  scale_fill_manual(name = " ",
+                    breaks = c("Structural genes", "Genome entry", "DNA packaging",
+                               "RNA/Transcription", "DNA replication and modification",
+                               "Lysis", "Metabolism-related genes",
+                               "Other viral functions", "unknown function",
+                               "Host gene (not metabolism related)"),
+                    values = c("#40B9EB", "#71C054", "#D0499A",
+                               "#FAA51A", "#ED1E24",
+                               "#F4EB21", "#70C6A5",
+                               "#8750A0", "#CCCCCC", "#426FB6")) +
+  # clean up layout
+  ylab(NULL) + xlab("Position (bp)") +
+  scale_y_discrete(expand = expansion(add = c(0.3, 1))) +
+  guides(fill = guide_legend(nrow = 2) ) +
+  theme(axis.text = element_text(size = 12), axis.title = element_text(size = 12),
+        # legend positioning and formatting 
+        legend.position = "bottom", legend.box = "horizontal", 
+        legend.key.size = unit(3, 'mm'),
+        legend.text = element_text(size = 10), legend.title = element_text(size = 10),
+        # remove facet panels
+        strip.background = element_blank(), strip.text = element_blank(), 
+        # draw line for genome length
+        panel.grid.major.y = element_line(color = "#000000")) 
+phg_plot
+```
+
+-----
+end
